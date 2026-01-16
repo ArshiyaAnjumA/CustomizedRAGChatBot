@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RAG Chatbot — Streaming Demo</title>
+
+  <style>
+    /*
+    WHY THIS STYLE EXISTS:
+    - Clean, modern, demo-ready
+    - No frameworks (React/Vue)
+    - Focus is RAG, not CSS complexity
+    */
+
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      background: linear-gradient(135deg, #0f2027, #203a43, #2c5364);
+      color: #eaeaea;
+      margin: 0;
+      padding: 0;
+    }
+
+    .app {
+      max-width: 900px;
+      margin: 30px auto;
+      background: #0b141a;
+      border-radius: 16px;
+      padding: 20px;
+      box-shadow: 0 20px 50px rgba(0,0,0,0.4);
+    }
+
+    h1 {
+      margin-top: 0;
+      font-size: 22px;
+      text-align: center;
+    }
+
+    .subtitle {
+      text-align: center;
+      font-size: 13px;
+      color: #9fb3c8;
+      margin-bottom: 20px;
+    }
+
+    /* Chat container */
+    .chat {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      height: 420px;
+      overflow-y: auto;
+      padding: 10px;
+      background: #071018;
+      border-radius: 12px;
+      border: 1px solid #1f2a33;
+    }
+
+    /* Message bubbles */
+    .message {
+      max-width: 75%;
+      padding: 12px 14px;
+      border-radius: 14px;
+      white-space: pre-wrap;
+      line-height: 1.45;
+      font-size: 14px;
+    }
+
+    .user {
+      align-self: flex-end;
+      background: #1e88e5;
+      color: white;
+    }
+
+    .bot {
+      align-self: flex-start;
+      background: #1b2730;
+      color: #eaeaea;
+      border: 1px solid #26343f;
+    }
+
+    .sources {
+      margin-top: 10px;
+      font-size: 12px;
+      color: #9fb3c8;
+    }
+
+    /* Input area */
+    .input-row {
+      display: flex;
+      gap: 10px;
+      margin-top: 14px;
+    }
+
+    textarea {
+      flex: 1;
+      resize: none;
+      height: 70px;
+      padding: 12px;
+      border-radius: 12px;
+      border: 1px solid #2a3a45;
+      background: #071018;
+      color: #eaeaea;
+      font-size: 14px;
+    }
+
+    textarea::placeholder {
+      color: #6c7a89;
+    }
+
+    button {
+      padding: 0 18px;
+      border-radius: 12px;
+      border: none;
+      background: linear-gradient(135deg, #42a5f5, #1e88e5);
+      color: white;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    button:hover {
+      opacity: 0.9;
+    }
+
+    /* Streaming cursor */
+    .cursor {
+      display: inline-block;
+      margin-left: 2px;
+      animation: blink 1s infinite;
+    }
+
+    @keyframes blink {
+      0% { opacity: 1; }
+      50% { opacity: 0; }
+      100% { opacity: 1; }
+    }
+
+    /* Footer hint */
+    .hint {
+      margin-top: 12px;
+      font-size: 12px;
+      color: #8fa3b8;
+      text-align: center;
+    }
+  </style>
+</head>
+
+<body>
+
+<div class="app">
+  <h1>RAG Chatbot (Streaming)</h1>
+  <div class="subtitle">
+    Streaming + Retrieval-Augmented Generation (RAG) demo
+  </div>
+
+  <!-- WHY:
+       This is where BOTH user + assistant messages appear
+       We append DOM nodes dynamically
+  -->
+  <div id="chat" class="chat"></div>
+
+  <!-- Input row -->
+  <div class="input-row">
+    <textarea id="input" placeholder="Ask something about your documents..."></textarea>
+    <button id="send">Send</button>
+  </div>
+
+  <div class="hint">
+    Backend: <code>POST /chat/stream</code> (tokens) + <code>POST /chat</code> (citations)
+  </div>
+</div>
+
+<script>
+/*
+================================================================================
+WHY THIS SCRIPT EXISTS (IMPORTANT):
+--------------------------------------------------------------------------------
+This frontend demonstrates ALL RAG-related behaviors:
+
+1️⃣ Session isolation
+   - Each browser tab gets its own session_id
+   - Backend keeps memory per session
+
+2️⃣ Streaming
+   - Tokens are displayed as they arrive
+   - No waiting for full completion
+
+3️⃣ RAG grounding
+   - Assistant answers are grounded in retrieved context
+   - Context is injected server-side
+
+4️⃣ Citations
+   - After streaming completes, we fetch /chat
+   - We append document sources under the answer
+
+This UI is intentionally "dumb":
+- No frameworks
+- No state management
+- The intelligence lives in the backend (RAG)
+================================================================================
+*/
+
+// Generate one session per browser tab
+const sessionId = crypto.randomUUID();
+
+// DOM references
+const chat = document.getElementById("chat");
+const input = document.getElementById("input");
+const sendBtn = document.getElementById("send");
+
+// Utility: create chat bubble
+function addMessage(role, text = "") {
+  const div = document.createElement("div");
+  div.className = `message ${role}`;
+  div.textContent = text;
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+  return div;
+}
+
+// Utility: format citations
+function renderSources(sources) {
+  if (!sources || sources.length === 0) return "";
+
+  let text = "\n\nSources:\n";
+  for (const s of sources) {
+    text += `• ${s.file}`;
+    if (s.page !== null && s.page !== undefined) {
+      text += ` (page ${s.page})`;
+    }
+    text += "\n";
+  }
+  return text;
+}
+
+// Handle Send
+sendBtn.onclick = async () => {
+  const userText = input.value.trim();
+  if (!userText) return;
+
+  input.value = "";
+
+  // 1️⃣ Render user message
+  addMessage("user", userText);
+
+  // 2️⃣ Create assistant bubble
+  const botBubble = addMessage("bot", "");
+
+  // 3️⃣ Add streaming cursor
+  const cursor = document.createElement("span");
+  cursor.className = "cursor";
+  cursor.textContent = "▌";
+  botBubble.appendChild(cursor);
+
+  // 4️⃣ Call streaming endpoint
+  const response = await fetch("http://127.0.0.1:8000/chat/stream", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      session_id: sessionId,
+      message: userText
+    })
+  });
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+
+  // 5️⃣ Read tokens as they arrive
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+
+    const token = decoder.decode(value, { stream: true });
+    botBubble.insertBefore(document.createTextNode(token), cursor);
+    chat.scrollTop = chat.scrollHeight;
+  }
+
+  // 6️⃣ Remove cursor when done
+  cursor.remove();
+
+  // 7️⃣ Fetch citations (non-streaming)
+  const citationResponse = await fetch("http://127.0.0.1:8000/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      session_id: sessionId,
+      message: userText
+    })
+  });
+
+  const citationData = await citationResponse.json();
+
+  // 8️⃣ Append sources under assistant message
+  const sourcesText = renderSources(citationData.sources);
+  if (sourcesText) {
+    const sourcesDiv = document.createElement("div");
+    sourcesDiv.className = "sources";
+    sourcesDiv.textContent = sourcesText;
+    botBubble.appendChild(sourcesDiv);
+  }
+};
+</script>
+
+</body>
+</html>

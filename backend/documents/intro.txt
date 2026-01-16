@@ -1,0 +1,2 @@
+This chatbot project is built using FastAPI and OpenAI.
+It supports sessions, memory, and retrieval augmented generation.
